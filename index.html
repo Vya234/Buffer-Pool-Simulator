@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Buffer Pool Simulator Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background: #f5f7fb; color: #1f2937; }
+    h1, h2 { margin: 8px 0; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    label { font-size: 14px; }
+    select, button, input { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; }
+    button { cursor: pointer; background: #2563eb; color: white; border: none; }
+    button.secondary { background: #475569; }
+    #bufferVisual { display: flex; gap: 8px; margin-top: 10px; }
+    .frame { width: 56px; height: 56px; border: 2px dashed #94a3b8; border-radius: 8px; display: flex; align-items: center; justify-content: center; background: #f8fafc; font-weight: bold; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #e5e7eb; padding: 6px; font-size: 13px; text-align: left; }
+    th { background: #f1f5f9; }
+  </style>
+</head>
+<body>
+  <h1>Buffer Pool Simulator</h1>
+
+  <div class="card">
+    <h2>Control Panel</h2>
+    <div class="row">
+      <label>Strategy:
+        <select id="strategy"></select>
+      </label>
+      <label>Workload:
+        <select id="workload"></select>
+      </label>
+      <label style="min-width:420px; flex:1;">SQL Query (SELECT/JOIN only):
+        <input id="sqlQuery" type="text" value="SELECT id, name, dept FROM Students LIMIT 10;" style="width:100%;" />
+      </label>
+      <label>Buffer Size:
+        <input id="bufferSize" type="number" value="8" min="1" />
+      </label>
+      <button id="runBtn">Run Simulation</button>
+      <button id="replayBtn" class="secondary">Replay Buffer</button>
+      <button id="csvBtn" class="secondary">Download CSV</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Buffer Animation (Step Replay)</h2>
+    <div id="bufferVisual"></div>
+  </div>
+
+  <div class="card">
+    <h2>Metrics</h2>
+    <table id="metricsTable">
+      <thead>
+        <tr>
+          <th>Strategy</th><th>Workload</th><th>Buffer</th><th>Reads</th><th>Writes</th>
+          <th>Total I/O</th><th>Hits</th><th>Misses</th><th>Hit Rate</th><th>Evictions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Query Result</h2>
+    <table id="queryTable">
+      <thead></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Disk I/O vs Buffer Size</h2>
+    <canvas id="ioChart"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>Hit Rate Comparison</h2>
+    <canvas id="hitChart"></canvas>
+  </div>
+
+  <script>
+    const apiBase = window.location.origin;
+    const strategySel = document.getElementById("strategy");
+    const workloadSel = document.getElementById("workload");
+    const bufferSizeInput = document.getElementById("bufferSize");
+    const sqlQueryInput = document.getElementById("sqlQuery");
+    const metricsBody = document.querySelector("#metricsTable tbody");
+    const queryHead = document.querySelector("#queryTable thead");
+    const queryBody = document.querySelector("#queryTable tbody");
+    const bufferVisual = document.getElementById("bufferVisual");
+    const replayStatus = document.createElement("div");
+    replayStatus.style.marginTop = "8px";
+    replayStatus.style.fontSize = "13px";
+    document.getElementById("bufferVisual").insertAdjacentElement("afterend", replayStatus);
+    let allResults = [];
+    let lastSteps = [];
+    let ioChart, hitChart;
+
+    function fillSelect(select, items) {
+      select.innerHTML = "";
+      items.forEach(v => {
+        const opt = document.createElement("option");
+        opt.value = v;
+        opt.textContent = v;
+        select.appendChild(opt);
+      });
+    }
+
+    function renderMetrics(rows) {
+      metricsBody.innerHTML = "";
+      rows.forEach(r => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${r.strategy}</td><td>${r.workload}</td><td>${r.buffer_size}</td>
+          <td>${r.disk_reads}</td><td>${r.disk_writes}</td><td>${r.total_io}</td>
+          <td>${r.hits}</td><td>${r.misses}</td><td>${Number(r.hit_rate).toFixed(2)}%</td><td>${r.evictions}</td>`;
+        metricsBody.appendChild(tr);
+      });
+    }
+
+    function renderCharts(rows) {
+      const grouped = {};
+      rows.forEach(r => {
+        const key = `${r.strategy}-${r.workload}`;
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(r);
+      });
+
+      const ioDatasets = [];
+      const hitDatasets = [];
+      const labels = [...new Set(rows.map(r => r.buffer_size))].sort((a, b) => a - b);
+      Object.keys(grouped).forEach((k, idx) => {
+        const color = `hsl(${(idx * 45) % 360},70%,45%)`;
+        const byBufferSize = new Map(grouped[k].map(x => [x.buffer_size, x]));
+        const ordered = labels.map(b => byBufferSize.get(b) || { total_io: 0, hit_rate: 0 });
+        ioDatasets.push({ label: k, data: ordered.map(x => x.total_io), borderColor: color, fill: false });
+        hitDatasets.push({ label: k, data: ordered.map(x => x.hit_rate), borderColor: color, fill: false });
+      });
+
+      if (ioChart) ioChart.destroy();
+      if (hitChart) hitChart.destroy();
+
+      ioChart = new Chart(document.getElementById("ioChart"), {
+        type: "line",
+        data: { labels, datasets: ioDatasets },
+        options: { responsive: true }
+      });
+      hitChart = new Chart(document.getElementById("hitChart"), {
+        type: "line",
+        data: { labels, datasets: hitDatasets },
+        options: { responsive: true }
+      });
+    }
+
+    function replayBuffer(bufferSize, steps) {
+      bufferVisual.innerHTML = "";
+      const frames = [];
+      for (let i = 0; i < bufferSize; i++) {
+        const d = document.createElement("div");
+        d.className = "frame";
+        d.textContent = "_";
+        frames.push(d);
+        bufferVisual.appendChild(d);
+      }
+
+      if (!steps || steps.length === 0) {
+        replayStatus.textContent = "No simulation trace available yet.";
+        return;
+      }
+
+      let step = 0;
+      const timer = setInterval(() => {
+        const entry = steps[step];
+        replayStatus.textContent = `Step ${entry.step}: ${entry.hit ? "HIT" : "MISS"} page ${entry.page} | evicted ${entry.evicted_page === -1 ? "-" : entry.evicted_page} | reason ${entry.eviction_reason || "-"} | dirty ${entry.dirty_eviction ? 1 : 0}`;
+        entry.buffer_state.forEach((v, idx) => {
+          if (idx < frames.length) {
+            frames[idx].textContent = v === -1 ? "_" : v;
+          }
+        });
+        step++;
+        if (step >= steps.length) clearInterval(timer);
+      }, 350);
+    }
+
+    function parseCsv(csvText) {
+      const lines = csvText.trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length <= 1) return [];
+      const headers = lines[0].split(",");
+      return lines.slice(1).map(line => {
+        const parts = line.split(",");
+        const row = {};
+        headers.forEach((h, i) => row[h] = parts[i]);
+        row.buffer_size = Number(row.buffer_size);
+        row.accesses = Number(row.accesses || 0);
+        row.disk_reads = Number(row.disk_reads);
+        row.disk_writes = Number(row.disk_writes);
+        row.total_io = Number(row.total_io);
+        row.hits = Number(row.hits);
+        row.misses = Number(row.misses);
+        row.hit_rate = Number(row.hit_rate);
+        row.evictions = Number(row.evictions);
+        return row;
+      });
+    }
+
+    async function refreshResults() {
+      const csvRes = await fetch(`${apiBase}/api/results/csv`);
+      if (!csvRes.ok) {
+        allResults = [];
+        renderMetrics([]);
+        renderCharts([]);
+        return;
+      }
+      const csvText = await csvRes.text();
+      allResults = parseCsv(csvText);
+      renderMetrics(allResults.slice(-20).reverse());
+      renderCharts(allResults);
+    }
+
+    function renderQueryTable(queryResult) {
+      queryHead.innerHTML = "";
+      queryBody.innerHTML = "";
+      if (!queryResult || !queryResult.columns) return;
+
+      const trh = document.createElement("tr");
+      queryResult.columns.forEach(c => {
+        const th = document.createElement("th");
+        th.textContent = c;
+        trh.appendChild(th);
+      });
+      queryHead.appendChild(trh);
+
+      queryResult.rows.forEach(r => {
+        const tr = document.createElement("tr");
+        r.forEach(v => {
+          const td = document.createElement("td");
+          td.textContent = v;
+          tr.appendChild(td);
+        });
+        queryBody.appendChild(tr);
+      });
+    }
+
+    document.getElementById("runBtn").addEventListener("click", async () => {
+      const sql = sqlQueryInput.value.trim();
+      if (!/^select\s+/i.test(sql)) {
+        alert("Only SELECT/JOIN queries are allowed.");
+        return;
+      }
+      const payload = {
+        strategy: strategySel.value,
+        workload: workloadSel.value,
+        buffer_size: Number(bufferSizeInput.value),
+        sql_query: sql
+      };
+      const runRes = await fetch(`${apiBase}/api/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const runData = await runRes.json();
+      if (runData.error) {
+        alert(runData.error);
+        return;
+      }
+      lastSteps = (runData.metrics && runData.metrics.steps) || [];
+      renderQueryTable(runData.query_result);
+      await refreshResults();
+      replayBuffer(payload.buffer_size, lastSteps);
+    });
+
+    document.getElementById("replayBtn").addEventListener("click", () => {
+      replayBuffer(Number(bufferSizeInput.value), lastSteps);
+    });
+
+    document.getElementById("csvBtn").addEventListener("click", () => {
+      window.open(`${apiBase}/api/results/csv`, "_blank");
+    });
+
+    async function init() {
+      const [strategies, workloads] = await Promise.all([
+        fetch(`${apiBase}/api/strategies`).then(r => r.json()),
+        fetch(`${apiBase}/api/workloads`).then(r => r.json())
+      ]);
+      fillSelect(strategySel, strategies);
+      fillSelect(workloadSel, workloads);
+      await refreshResults();
+      replayBuffer(Number(bufferSizeInput.value), []);
+    }
+
+    init();
+  </script>
+</body>
+</html>

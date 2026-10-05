@@ -1,0 +1,22 @@
+# Compiled executable
+buffer_sim
+*.exe
+
+# SQLite database generated at runtime
+simulation.db
+*.db
+
+# Generated results
+results.csv
+join_output.txt
+data.txt
+
+# Runtime logs
+log_clock.txt
+log_lru.txt
+log_mru.txt
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
