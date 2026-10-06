@@ -314,10 +314,10 @@ http://localhost:8080
 
 ---
 
-## Implementation Details
-
 ### Page Representation
+
 Each page stores metadata including:
+
 - File pointer
 - Page number
 - Dirty flag
@@ -329,19 +329,107 @@ Each page stores metadata including:
 
 The simulator uses a fixed page size of **512 bytes**.
 
+---
+
 ### Page Lookup
-Pages are indexed using a hash map keyed by `(FILE*, page_number)`, providing average $O(1)$ lookup.
+
+Pages are indexed using a hash map keyed by:
+
+```text
+(FILE*, page_number)
+```
+
+This provides average **O(1)** page lookup.
+
+---
 
 ### Pinning
-Pinned pages **cannot** be selected as eviction victims.
+
+Pinned pages cannot be selected as eviction victims.
+
+This prevents pages that are currently in use from being removed from the buffer pool.
+
+---
 
 ### Dirty Pages
-When a dirty page is selected for eviction:
-$$\text{Dirty Page} \longrightarrow \text{Write Page to Disk} \longrightarrow \text{Evict Page} \longrightarrow \text{Load New Page}$$
+
+A page marked as dirty has been modified while residing in the buffer. When a dirty page is selected for eviction, it must first be written back to disk.
+
+```text
+Dirty Page
+    │
+    ▼
+Write Page to Disk
+    │
+    ▼
+Evict Page
+    │
+    ▼
+Load New Page
+```
+
+This contributes to the disk write count recorded by the simulator.
+
+---
 
 ### CLOCK Reference Bit
-CLOCK uses a reference bit for each frame:
-$$\text{ref\_bit} = 1 \longrightarrow \text{Second chance} \longrightarrow \text{ref\_bit} = 0 \longrightarrow \text{Next clock sweep can evict}$$
+
+CLOCK uses a reference bit for each buffer frame to provide a second chance to recently accessed pages.
+
+```text
+ref_bit = 1
+    │
+    ▼
+Give page a second chance
+    │
+    ▼
+Clear ref_bit
+    │
+    ▼
+Advance clock hand
+    │
+    ▼
+If ref_bit = 0
+    │
+    ▼
+Page can be selected for eviction
+```
+
+The clock hand moves circularly through the buffer frames. When it encounters a page with `ref_bit = 1`, the bit is cleared and the page is given another chance. A page with `ref_bit = 0` can be selected as the eviction victim, provided it is not pinned.
+
+---
+
+### Buffer Pool Management
+
+The buffer manager maintains a fixed number of frames according to the configured buffer size.
+
+For every page request:
+
+1. Check whether the page is already present in the buffer.
+2. If present, record a buffer hit.
+3. If absent, record a buffer miss and perform a disk read.
+4. If a free frame is available, load the page into that frame.
+5. If the buffer is full, select an eviction victim according to the selected replacement strategy.
+6. If the victim is dirty, write it back to disk.
+7. Replace the victim with the requested page.
+8. Update the corresponding buffer metadata and statistics.
+
+---
+
+### Performance Tracking
+
+The simulator tracks the following statistics during execution:
+
+- Disk reads
+- Disk writes
+- Total I/O
+- Buffer hits
+- Buffer misses
+- Hit rate
+- Page evictions
+- Dirty-page evictions
+
+These metrics are used to compare the performance of **LRU**, **MRU**, and **CLOCK** under different workloads and buffer sizes.
 
 ---
 
